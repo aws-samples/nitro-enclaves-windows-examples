@@ -1,0 +1,164 @@
+ # Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ #
+
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  This template manages CloudFormation resources needed for testing enclaves
+
+Parameters:
+  WindowsAMIID:
+    Description: The Latest Windows 2019 AMI taken from the public Systems Manager Parameter Store
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /aws/service/ami-windows-latest/Windows_Server-2019-English-Full-Base
+
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable RDP access to the instance.
+    Type: AWS::EC2::KeyPair::KeyName
+    ConstraintDescription: Must be the name of an existing EC2 KeyPair.
+    Default: "nitro-enclaves-example"
+
+  ExistingSecurityGroup:
+    Description: Name of default VPC security group name.
+    Default: default
+    Type: String
+    AllowedValues:
+      - default
+      - NONE
+
+  InstanceType:
+    Description: Type of the instance to create from which the enclave can be run
+    Type: String
+    Default: m5.xlarge
+
+Conditions:
+  CreateNewSecurityGroup: !Equals [!Ref ExistingSecurityGroup, NONE]
+
+Resources:
+  # Create IAM Role required for the EC2 instances.
+  EnclaveTestInstanceIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: ApplicationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeTags
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:GetObjectVersion
+                  - s3:ListBucket
+                Resource: '*'
+
+  # Attach IAM role to the instance
+  EnclaveTestInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles: [!Ref 'EnclaveTestInstanceIamRole']
+
+  # Create KMS key
+  EnclaveTestKmsKey:
+    Type: AWS::KMS::Key
+    Properties: 
+      Description: Enclave Test Kms Key
+      Enabled: true
+      EnableKeyRotation: false
+      PendingWindowInDays: 7
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: key-default-1
+        Statement:
+        - Sid: Enable IAM User Permissions
+          Effect: Allow
+          Principal:
+            AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+          Action: kms:*
+          Resource: '*'
+        - Sid: Allow administration of the key via Admin role
+          Effect: Allow
+          Principal:
+            AWS: !Sub "arn:aws:iam::${AWS::AccountId}:role/Admin"
+          Action:
+          - kms:Create*
+          - kms:Describe*
+          - kms:Enable*
+          - kms:List*
+          - kms:Put*
+          - kms:Update*
+          - kms:Revoke*
+          - kms:Disable*
+          - kms:Get*
+          - kms:Delete*
+          - kms:ScheduleKeyDeletion
+          - kms:CancelKeyDeletion
+          Resource: '*'
+        - Sid: Allow use of the key to encrypt from parent
+          Effect: Allow
+          Principal:
+            AWS: !GetAtt EnclaveTestInstanceIamRole.Arn
+          Action:
+          - kms:DescribeKey
+          - kms:Encrypt
+          - kms:GenerateDataKey
+          - kms:GenerateDataKeyWithoutPlaintext
+          Resource: '*'
+        - Sid: Allow use of the key to decrypt from enclave
+          Effect: Allow
+          Principal:
+            AWS: !GetAtt EnclaveTestInstanceIamRole.Arn
+          Action:
+          - kms:DescribeKey
+          - kms:Decrypt
+          Resource: '*'
+          Condition:
+            StringEqualsIgnoreCase: 
+              'kms:RecipientAttestation:ImageSha384': 'ff5115aaa0df04ed34e4fbf2f7409e291e184e5f1ba002801e48c94d98d2400b58621008c55625088f6b3ba69ee3c6d2'
+              'kms:RecipientAttestation:PCR1': 'ef5b4f1f63c3fe666bdf4a096bae53439d28a9fa70c33241c0e1479a1b6f17cff6d100accbe01d766a19e8116b0a2c70'
+              'kms:RecipientAttestation:PCR2': '44727690a1db01198953fd0bfc0fab1d644db0a831fe7e709bf4b5a6404ed38ff264896e95a5663c9d6b680bf02912cb'
+
+  # Create an alias to easily refer to the key
+  EnclaveTestKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${AWS::StackName}-KmsToolKey'
+      TargetKeyId: !Ref EnclaveTestKmsKey
+
+  # Create an EC2 instance to try the enclaves
+  EnclaveTestInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: !Ref 'EnclaveTestInstanceProfile'
+      InstanceType: !Ref 'InstanceType'
+      KeyName: !Ref 'KeyName'
+      ImageId: !Ref 'WindowsAMIID'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Instance'
+      SecurityGroups: [!Ref 'ExistingSecurityGroup']
+      EnclaveOptions:
+        Enabled: true
+      UserData:
+        Fn::Base64:
+          !Sub |
+            <powershell>
+              Set-ExecutionPolicy RemoteSigned -Force
+              Import-Module AWSPowerShell
+              if ([Environment]::OSVersion.Version.Major -eq 6 -and [Environment]::OSVersion.Version.Minor -eq 3) {
+                bcdedit /set testsigning on
+                shutdown -r -t 0
+              }
+            </powershell>
