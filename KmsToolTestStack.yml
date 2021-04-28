@@ -1,5 +1,4 @@
- # Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
- #
+# Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
 AWSTemplateFormatVersion: "2010-09-09"
 
@@ -25,6 +24,10 @@ Parameters:
     AllowedValues:
       - default
       - NONE
+
+  InstanceFileBucketName:
+    Description: Name of the s3 bucket hosting InstanceFiles.zip
+    Type: String
 
   InstanceType:
     Description: Type of the instance to create from which the enclave can be run
@@ -162,3 +165,9 @@ Resources:
                 shutdown -r -t 0
               }
             </powershell>
+
+  # Add Instance ID Output
+Outputs:
+  InstanceID:
+    Description: The Instance ID of the Windows Instance
+    Value: !Ref EnclaveTestInstance
